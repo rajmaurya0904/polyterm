@@ -8,6 +8,11 @@ import { DepthLadder } from './components/DepthLadder';
 import { PriceChart, type Series } from './components/PriceChart';
 import { AccountSummary, OrderTicket, Positions } from './components/PaperPanel';
 import { Ticker } from './components/Ticker';
+import { MarketsView } from './views/MarketsView';
+import { BlotterView } from './views/BlotterView';
+import { PositionsView } from './views/PositionsView';
+import { HistoryView } from './views/HistoryView';
+import { useTrades } from './hooks/useTrades';
 import { compact } from './format';
 import type { HistoryPoint, Preset, Row } from './types';
 
@@ -34,6 +39,9 @@ export default function App() {
   const [theme, setTheme] = useState(() => localStorage.getItem(THEME_KEY) ?? 'dark');
   const [history, setHistory] = useState<Record<string, HistoryPoint[]>>({});
   const [loadingHistory, setLoadingHistory] = useState(false);
+  // Bumped whenever a paper order lands, so the trade log refetches.
+  const [tradeVersion, setTradeVersion] = useState(0);
+  const { trades, loading: loadingTrades } = useTrades(tradeVersion);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -178,56 +186,82 @@ export default function App() {
           </button>
         </header>
 
-        <div className="board">
-          <div className="col">
-            <Panel
-              title="Markets"
-              flush
-              actions={<span className="faint" style={{ fontSize: 11 }}>by 24h volume</span>}
-            >
-              <QuoteTable rows={visibleRows} selected={selectedId} onSelect={setSelectedId} />
-            </Panel>
-          </div>
-
-          <div className="col">
-            <Panel
-              title={selected ? selected.question : 'Price history'}
-              actions={
-                selected && (
-                  <span className="faint" style={{ fontSize: 11 }}>
-                    {compact(selected.volume24h)} · 24h
-                  </span>
-                )
-              }
-            >
-              <PriceChart series={series} loading={loadingHistory && !series.length} />
-            </Panel>
-
-            <Panel title="Blotter" flush>
-              <Blotter rows={visibleRows} onSelect={setSelectedId} />
-            </Panel>
-
-            <Panel title="Positions" flush>
-              <Positions positions={snapshot?.positions ?? []} onSelect={setSelectedId} />
-            </Panel>
-          </div>
-
-          <div className="col">
-            <Panel title="Order book" flush>
-              <DepthLadder book={selected?.book ?? null} />
-            </Panel>
-
-            <Panel title="Paper ticket">
-              <OrderTicket row={selected} onPlaced={() => undefined} />
-            </Panel>
-
-            {snapshot && (
-              <Panel title="Account">
-                <AccountSummary account={snapshot.account} />
+        {view === 'board' ? (
+          <div className="board">
+            <div className="col">
+              <Panel
+                title="Markets"
+                flush
+                actions={<span className="faint" style={{ fontSize: 11 }}>by 24h volume</span>}
+              >
+                <QuoteTable rows={visibleRows} selected={selectedId} onSelect={setSelectedId} />
               </Panel>
-            )}
+            </div>
+
+            <div className="col">
+              <Panel
+                title={selected ? selected.question : 'Price history'}
+                actions={
+                  selected && (
+                    <span className="faint" style={{ fontSize: 11 }}>
+                      {compact(selected.volume24h)} · 24h
+                    </span>
+                  )
+                }
+              >
+                <PriceChart series={series} loading={loadingHistory && !series.length} />
+              </Panel>
+
+              <Panel title="Blotter" flush>
+                <Blotter rows={visibleRows} onSelect={setSelectedId} />
+              </Panel>
+
+              <Panel title="Positions" flush>
+                <Positions positions={snapshot?.positions ?? []} onSelect={setSelectedId} />
+              </Panel>
+            </div>
+
+            <div className="col">
+              <Panel title="Order book" flush>
+                <DepthLadder book={selected?.book ?? null} />
+              </Panel>
+
+              <Panel title="Paper ticket">
+                <OrderTicket row={selected} onPlaced={() => setTradeVersion((v) => v + 1)} />
+              </Panel>
+
+              {snapshot && (
+                <Panel title="Account">
+                  <AccountSummary account={snapshot.account} />
+                </Panel>
+              )}
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="page">
+            {view === 'markets' && (
+              <MarketsView
+                rows={visibleRows}
+                onSelect={(id) => { setSelectedId(id); setView('board'); }}
+              />
+            )}
+            {view === 'blotter' && (
+              <BlotterView
+                rows={visibleRows}
+                onSelect={(id) => { setSelectedId(id); setView('board'); }}
+              />
+            )}
+            {view === 'positions' && snapshot && (
+              <PositionsView
+                positions={snapshot.positions}
+                account={snapshot.account}
+                onSelect={(id) => { setSelectedId(id); setView('board'); }}
+                onChanged={() => setTradeVersion((v) => v + 1)}
+              />
+            )}
+            {view === 'history' && <HistoryView trades={trades} loading={loadingTrades} />}
+          </div>
+        )}
 
         <Ticker rows={rows} />
       </div>

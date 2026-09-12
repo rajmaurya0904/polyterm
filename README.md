@@ -20,10 +20,20 @@ authenticates against the trading API; there is no code path that can place a re
 - **Presets & filters** — saved category views, faceted multi-select
 - **Light / dark** — token-driven, persisted
 
+## Pages
+
+| Page | What's there |
+| --- | --- |
+| **Board** | Three-column terminal — quote grid, price chart, blotter, depth ladder, paper ticket |
+| **Markets** | Every watched market, plus search to add any Polymarket market to the live feed |
+| **Blotter** | Full-width two-sided quotes, sortable by spread, resting size or volume |
+| **Positions** | Stat tiles, mark-to-market, one-click close, account reset |
+| **History** | Trade log; expand a row to see the individual fills it walked |
+
 ## Quick start
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/polyterm.git
+git clone https://github.com/rajmaurya0904/polyterm.git
 cd polyterm
 npm install
 npm run dev
@@ -110,10 +120,11 @@ server/src/
   socket.js      upstream socket with backoff
   paper.js       fill simulation & position accounting
 web/src/
-  App.tsx        board composition
+  App.tsx        shell, routing, board composition
+  views/         Markets, Blotter, Positions, History
   components/    Panel, QuoteTable, Blotter, PriceChart,
                  DepthLadder, PaperPanel, Shell, Ticker
-  hooks/         useLiveSnapshot
+  hooks/         useLiveSnapshot, useTrades
   theme.css      design tokens
 ```
 

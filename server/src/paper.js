@@ -11,6 +11,61 @@ import path from 'node:path';
 
 const DEFAULT_BALANCE = 10_000;
 
+/**
+ * Walk the book to fill `shares`, the way a marketable order would: consume
+ * each level in turn until filled or the limit price is crossed. Returns a
+ * partial fill when the book runs dry — never invents liquidity.
+ *
+ * Pure, so the fill maths can be tested without a store or a live feed.
+ */
+export function simulate(levels, shares, limit, side) {
+  let remaining = shares;
+  let cost = 0;
+  const fills = [];
+  for (const [price, size] of levels) {
+    if (remaining <= 0) break;
+    if (limit != null) {
+      if (side === 'buy' && price > limit) break;
+      if (side === 'sell' && price < limit) break;
+    }
+    const take = Math.min(remaining, size);
+    if (take <= 0) continue;
+    cost += take * price;
+    remaining -= take;
+    fills.push({ price, size: take });
+  }
+  const filled = shares - remaining;
+  return { filled, cost, avg: filled > 0 ? cost / filled : 0, fills, unfilled: remaining };
+}
+
+/**
+ * Net position per token, derived from the trade log rather than stored
+ * alongside it — the log is the single source of truth, so the two can never
+ * disagree. Sells reduce cost at the running average, which is what leaves
+ * realized P/L out of the remaining basis.
+ */
+export function derivePositions(trades) {
+  const acc = new Map();
+  for (const t of trades) {
+    const cur = acc.get(t.tokenId) || {
+      tokenId: t.tokenId, marketId: t.marketId, outcomeIndex: t.outcomeIndex,
+      question: t.question, outcome: t.outcome, shares: 0, cost: 0,
+    };
+    if (t.side === 'buy') {
+      cur.shares += t.filled;
+      cur.cost += t.filled * t.avg;
+    } else {
+      const avgCost = cur.shares > 0 ? cur.cost / cur.shares : 0;
+      cur.shares -= t.filled;
+      cur.cost -= t.filled * avgCost;
+    }
+    acc.set(t.tokenId, cur);
+  }
+  return [...acc.values()]
+    .filter((p) => Math.abs(p.shares) > 1e-9)
+    .map((p) => ({ ...p, avgCost: p.cost / p.shares }));
+}
+
 export function createPaperStore(filePath) {
   const dir = path.dirname(filePath);
 
@@ -44,53 +99,8 @@ export function createPaperStore(filePath) {
     return lastId;
   }
 
-  /**
-   * Walk the book to fill `shares`, the way a marketable order would: consume
-   * each level in turn until filled or the limit price is crossed. Returns a
-   * partial fill when the book runs dry — never invents liquidity.
-   */
-  function simulate(levels, shares, limit, side) {
-    let remaining = shares;
-    let cost = 0;
-    const fills = [];
-    for (const [price, size] of levels) {
-      if (remaining <= 0) break;
-      if (limit != null) {
-        if (side === 'buy' && price > limit) break;
-        if (side === 'sell' && price < limit) break;
-      }
-      const take = Math.min(remaining, size);
-      if (take <= 0) continue;
-      cost += take * price;
-      remaining -= take;
-      fills.push({ price, size: take });
-    }
-    const filled = shares - remaining;
-    return { filled, cost, avg: filled > 0 ? cost / filled : 0, fills, unfilled: remaining };
-  }
-
-  /** Net position per token, derived from the trade log. */
-  function positions() {
-    const acc = new Map();
-    for (const t of state.trades) {
-      const cur = acc.get(t.tokenId) || {
-        tokenId: t.tokenId, marketId: t.marketId, outcomeIndex: t.outcomeIndex,
-        question: t.question, outcome: t.outcome, shares: 0, cost: 0,
-      };
-      if (t.side === 'buy') {
-        cur.shares += t.filled;
-        cur.cost += t.filled * t.avg;
-      } else {
-        const avgCost = cur.shares > 0 ? cur.cost / cur.shares : 0;
-        cur.shares -= t.filled;
-        cur.cost -= t.filled * avgCost;
-      }
-      acc.set(t.tokenId, cur);
-    }
-    return [...acc.values()]
-      .filter((p) => Math.abs(p.shares) > 1e-9)
-      .map((p) => ({ ...p, avgCost: p.cost / p.shares }));
-  }
+  // Reads `state` at call time, so it follows a reset.
+  const positions = () => derivePositions(state.trades);
 
   return {
     get state() {

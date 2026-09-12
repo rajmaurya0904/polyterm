@@ -71,6 +71,19 @@ export function categorise(market) {
   return 'OTHER';
 }
 
+/**
+ * A last-trade price outside the current spread is stale and the book wins.
+ *
+ * The socket pushes trades faster than book snapshots, so on a fast market
+ * `last` can sit outside a spread that has since moved. Showing it as a live
+ * quote is worse than flagging it, because it reads as a price you could get.
+ * The tolerance absorbs float noise, not genuine drift.
+ */
+export function isStale(row) {
+  if (row.last == null || row.bid == null || row.ask == null) return false;
+  return row.last < row.bid - 0.001 || row.last > row.ask + 0.001;
+}
+
 /** Top active markets by 24h volume. */
 export async function fetchTopMarkets(limit = 20) {
   const url = `${GAMMA}/markets?limit=${limit}&active=true&closed=false&order=volume24hr&ascending=false`;

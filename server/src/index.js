@@ -13,7 +13,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 
-import { fetchBook, fetchHistory, fetchMarket, fetchTopMarkets, searchMarkets, toRows } from './polymarket.js';
+import { fetchBook, fetchHistory, fetchMarket, fetchTopMarkets, isStale, searchMarkets, toRows } from './polymarket.js';
 import { createMarketSocket } from './socket.js';
 import { createPaperStore } from './paper.js';
 
@@ -94,12 +94,6 @@ async function refreshBooks() {
       // Transient network failure — keep the previous snapshot.
     }
   }));
-}
-
-/** A last price outside the current spread is stale; the book wins. */
-function isStale(row) {
-  if (row.last == null || row.bid == null || row.ask == null) return false;
-  return row.last < row.bid - 0.001 || row.last > row.ask + 0.001;
 }
 
 function snapshot() {

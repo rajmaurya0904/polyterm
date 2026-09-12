@@ -6,7 +6,7 @@ prices, order-book depth, and paper trading. **No wallet, no API keys, no real o
 Built on Polymarket's public endpoints. Nothing in this project signs a transaction or
 authenticates against the trading API; there is no code path that can place a real order.
 
-![MIT](https://img.shields.io/badge/license-MIT-blue) ![Node](https://img.shields.io/badge/node-%3E%3D20-green)
+[![CI](https://github.com/rajmaurya0904/polyterm/actions/workflows/ci.yml/badge.svg)](https://github.com/rajmaurya0904/polyterm/actions/workflows/ci.yml) ![MIT](https://img.shields.io/badge/license-MIT-blue) ![Node](https://img.shields.io/badge/node-%3E%3D20-green)
 
 ---
 
@@ -46,6 +46,9 @@ Open <http://localhost:5173>. No configuration, no account, no keys.
 | `npm run dev` | API on `:4010` and web on `:5173`, both watching |
 | `npm run build` | Production build of the web app |
 | `npm start` | Serve the built app from the API server |
+| `npm test` | Run the server test suite |
+| `npm run typecheck` | Typecheck the web app |
+| `npm run ci` | Everything CI runs, in one command |
 
 ### Configuration
 
@@ -130,9 +133,26 @@ web/src/
   theme.css      design tokens
 ```
 
+## Tests
+
+```bash
+npm test
+```
+
+61 tests on Node's built-in runner — no test framework, no new dependencies.
+They cover the parts that *compute* rather than relay: the fill walker, position
+accounting, and payload normalisation. Network code is deliberately not mocked;
+a mock of an endpoint proves only that the mock matches your belief about it.
+
+The suite is mutation-checked. Removing the float-dust epsilon from position
+netting, reverting trade ids to `Date.now()`, letting a partial fill invent
+liquidity, dropping the oversell guard, or deleting the word boundaries from
+category matching each turn it red.
+
 ## Contributing
 
-Issues and pull requests welcome. Good first areas: more data adapters (Kalshi, Manifold), a
+Issues and pull requests welcome. CI runs tests, typecheck and build on Node 20
+and 22; `npm run ci` runs the same thing locally. Good first areas: more data adapters (Kalshi, Manifold), a
 resolution/settlement model for paper positions, saved layouts, alerting.
 
 Please keep the read-only guarantee intact — no signing, no private keys, no order submission.

@@ -14,8 +14,8 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 
 import {
-  fetchBook, fetchHistory, fetchMarket, fetchTopMarkets, isStale, quoteState, resolutionOf,
-  searchMarkets, toRows,
+  fetchBook, fetchBooks, fetchHistory, fetchMarket, fetchUniverse, isStale, quoteState,
+  resolutionOf, searchMarkets, SEGMENTS, toRows,
 } from './polymarket.js';
 import { createMarketSocket } from './socket.js';
 import { createPaperStore } from './paper.js';
@@ -25,12 +25,21 @@ const PORT = Number(process.env.PORT) || 4010;
 // Loopback by default. Set HOST=0.0.0.0 to expose on the LAN — there is no
 // auth, so anyone who can reach the port can move the paper account.
 const HOST = process.env.HOST || '127.0.0.1';
-const TOP_N = Number(process.env.TOP_MARKETS) || 24;
+// Events pulled per segment. Each yields one or more markets, each of those
+// two or more outcomes, so this multiplies out quickly.
+const PER_SEGMENT = Number(process.env.PER_SEGMENT) || 20;
 const BOOK_REFRESH_MS = Number(process.env.BOOK_REFRESH_MS) || 4000;
 const BROADCAST_MS = 1000;
+// Outcomes the bulk endpoint skipped are re-checked individually, a few per
+// pass, purely to tell "resolved" apart from "no data".
+const PROBE_PER_TICK = Number(process.env.PROBE_PER_TICK) || 12;
 // Every watched outcome costs one book request per refresh, so the watch set
 // has to be bounded or a loop of /api/watch calls becomes a request storm.
-const MAX_OUTCOMES = Number(process.env.MAX_OUTCOMES) || 200;
+const MAX_OUTCOMES = Number(process.env.MAX_OUTCOMES) || 450;
+// Depth sent for a row nobody is looking at. The full ladder goes only to the
+// focused and held rows, so the broadcast does not grow with the board.
+const IDLE_DEPTH = 1;
+const FULL_DEPTH = 8;
 // How often held markets are asked whether the oracle has ruled. Resolution
 // takes hours to days, so a minute is generous; it is one request per held
 // market, not per outcome.
@@ -50,9 +59,10 @@ function rowList() {
   return [...rows.values()];
 }
 
-function addMarket(market) {
+function addMarket(market, segment) {
   const added = [];
-  for (const row of toRows(market)) {
+  for (const row of toRows(market, segment)) {
+    if (rows.size >= MAX_OUTCOMES) break;
     if (rows.has(row.tokenId)) continue;
     rows.set(row.tokenId, row);
     added.push(row);
@@ -85,9 +95,46 @@ const socket = createMarketSocket({
  * The socket carries trades reliably but book snapshots only intermittently,
  * and its last-trade price can drift outside the current spread on fast
  * markets. REST is the authority for depth; the socket supplies immediacy.
+ *
+ * One bulk request covers 250 outcomes, so the cost of a refresh is a handful
+ * of requests regardless of how large the board is.
  */
 async function refreshBooks() {
-  await Promise.all(rowList().map(async (row) => {
+  const list = rowList();
+  const books = await fetchBooks(list.map((r) => r.tokenId));
+  const missing = [];
+
+  for (const row of list) {
+    const book = books.get(row.tokenId);
+    if (!book) { missing.push(row); continue; }
+    row.resolved = false;
+    row.book = { bids: book.bids, asks: book.asks };
+    row.bid = book.bids.length ? book.bids[0][0] : null;
+    row.ask = book.asks.length ? book.asks[0][0] : null;
+    if (row.last == null && Number.isFinite(book.last)) row.last = book.last;
+    if (row.last == null && row.bid != null) row.last = row.bid;
+  }
+
+  if (missing.length) await probeMissing(missing);
+}
+
+/**
+ * Ask about outcomes the bulk endpoint skipped.
+ *
+ * Omission alone does not say why, and the difference matters: a 404 means the
+ * market resolved and its book was withdrawn, which the UI labels; anything
+ * else is a gap we should not dress up as a resolution. Only a few are checked
+ * per pass, so a large board cannot turn this into a flood.
+ */
+let probeCursor = 0;
+async function probeMissing(missing) {
+  const batch = [];
+  for (let i = 0; i < Math.min(PROBE_PER_TICK, missing.length); i += 1) {
+    batch.push(missing[(probeCursor + i) % missing.length]);
+  }
+  probeCursor = (probeCursor + batch.length) % Math.max(missing.length, 1);
+
+  await Promise.all(batch.map(async (row) => {
     try {
       const book = await fetchBook(row.tokenId);
       if (book === 'gone') { row.resolved = true; row.book = null; row.bid = null; row.ask = null; return; }
@@ -96,9 +143,8 @@ async function refreshBooks() {
       row.book = book;
       row.bid = book.bids.length ? book.bids[0][0] : null;
       row.ask = book.asks.length ? book.asks[0][0] : null;
-      if (row.last == null && row.bid != null) row.last = row.bid;
     } catch {
-      // Transient network failure — keep the previous snapshot.
+      // Transient — keep whatever we had.
     }
   }));
 }
@@ -154,8 +200,16 @@ async function checkSettlements() {
   return settled;
 }
 
+/** Full ladder for what someone is looking at or holding; a touch for the rest. */
+function bookFor(row, deep) {
+  const n = deep.has(row.tokenId) ? FULL_DEPTH : IDLE_DEPTH;
+  return { bids: row.book.bids.slice(0, n), asks: row.book.asks.slice(0, n) };
+}
+
 function snapshot() {
   const list = rowList();
+  const deep = new Set(focused);
+  for (const p of paper.positions()) deep.add(p.tokenId);
   const marked = paper.positions().map((p) => {
     const row = rows.get(p.tokenId);
     const mark = row ? row.bid : null;
@@ -176,9 +230,7 @@ function snapshot() {
     rows: list.map((r) => ({
       tokenId: r.tokenId,
       marketId: r.marketId,
-      outcomeIndex: r.outcomeIndex,
       question: r.question,
-      slug: r.slug,
       outcome: r.outcome,
       category: r.category,
       bid: r.bid,
@@ -192,11 +244,12 @@ function snapshot() {
       resolved: r.resolved,
       payout: r.payout ?? null,
       quote: quoteState(r),
-      book: r.book ? { bids: r.book.bids.slice(0, 8), asks: r.book.asks.slice(0, 8) } : null,
+      book: r.book ? bookFor(r, deep) : null,
       held: marked.some((p) => p.tokenId === r.tokenId),
     })),
     positions: marked,
     account: paper.state,
+    segments: SEGMENTS.map((s) => s.key),
   };
 }
 
@@ -323,14 +376,42 @@ function broadcast() {
   }
 }
 
+/**
+ * Tokens some client currently has open. They get full depth; everything else
+ * is sent top-of-book only, which is what keeps a 400-row board's broadcast the
+ * same size as a 40-row one.
+ */
+const focused = new Set();
+
+function recomputeFocus() {
+  focused.clear();
+  for (const client of wss.clients) {
+    if (client.focusToken) focused.add(client.focusToken);
+  }
+}
+
 wss.on('connection', (client) => {
+  client.on('message', (raw) => {
+    let msg;
+    try {
+      msg = JSON.parse(raw.toString());
+    } catch {
+      return;
+    }
+    if (msg && msg.type === 'focus') {
+      client.focusToken = typeof msg.tokenId === 'string' ? msg.tokenId : null;
+      recomputeFocus();
+      client.send(JSON.stringify(snapshot()));
+    }
+  });
+  client.on('close', recomputeFocus);
   client.send(JSON.stringify(snapshot()));
 });
 
 async function main() {
-  console.log('Loading markets…');
-  const markets = await fetchTopMarkets(TOP_N);
-  for (const market of markets) addMarket(market);
+  console.log(`Loading ${SEGMENTS.length} segments…`);
+  const universe = await fetchUniverse({ perSegment: PER_SEGMENT, maxOutcomes: MAX_OUTCOMES });
+  for (const { market, segment } of universe) addMarket(market, segment);
 
   // Anything already held must be watched, or positions cannot be marked.
   for (const position of paper.positions()) {
@@ -342,7 +423,10 @@ async function main() {
     }
   }
 
-  console.log(`Watching ${rows.size} outcomes across ${markets.length} markets.`);
+  const perSegment = {};
+  for (const row of rowList()) perSegment[row.category] = (perSegment[row.category] || 0) + 1;
+  console.log(`Watching ${rows.size} outcomes across ${universe.length} markets:`);
+  for (const { key } of SEGMENTS) console.log(`  ${key.padEnd(9)} ${perSegment[key] || 0}`);
   socket.start(rowList().map((r) => r.tokenId));
   await refreshBooks();
 

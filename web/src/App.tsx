@@ -30,7 +30,7 @@ function loadPresets(): Preset[] {
 }
 
 export default function App() {
-  const { snapshot, connected } = useLiveSnapshot();
+  const { snapshot, connected, focus } = useLiveSnapshot();
   const [view, setView] = useState('board');
   const [categories, setCategories] = useState<string[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -54,10 +54,14 @@ export default function App() {
 
   const rows = snapshot?.rows ?? [];
 
-  const allCategories = useMemo(
-    () => [...new Set(rows.map((r) => r.category))].sort(),
-    [rows],
-  );
+  // Segment order comes from the relay — it is priority, not alphabet — with
+  // any stragglers (search results, watched ids) appended.
+  const allCategories = useMemo(() => {
+    const present = new Set(rows.map((r) => r.category));
+    const ordered = (snapshot?.segments ?? []).filter((s) => present.has(s));
+    const extra = [...present].filter((c) => !ordered.includes(c)).sort();
+    return [...ordered, ...extra];
+  }, [rows, snapshot]);
 
   const visibleRows = useMemo(
     () => (categories.length ? rows.filter((r) => categories.includes(r.category)) : rows),
@@ -74,6 +78,9 @@ export default function App() {
     () => rows.find((r) => r.tokenId === selectedId) ?? null,
     [rows, selectedId],
   );
+
+  // Ask the relay for full depth on whatever is open.
+  useEffect(() => { focus(selectedId); }, [selectedId, focus]);
 
   /**
    * Fetch history for every outcome of the selected market, so a binary market

@@ -3,7 +3,8 @@
 # PolyTerm
 
 **A live trading terminal for [Polymarket](https://polymarket.com) prediction markets.**
-Real-time prices, order-book depth, and paper trading that settles when markets resolve.
+Every segment of the board, real-time prices, order-book depth, and paper trading that
+settles when markets resolve.
 
 No wallet. No API keys. No real orders — and no code path that could place one.
 
@@ -41,7 +42,8 @@ starts flowing within a few seconds.
 
 ## What you get
 
-- **Live quote board** — top markets by 24h volume, grouped by category, flashing on every tick
+- **The whole board** — every Polymarket segment (economy, politics, crypto, sports, world,
+  tech, science, culture, weather), busiest markets first within each, flashing on every tick
 - **Order-book ladder** — depth bars, mid price, spread
 - **Price history** — multi-series chart with crosshair and value pills; hand-rolled SVG, no chart library
 - **Blotter** — top-of-book bid and offer lines with resting size, sortable by spread, size or volume
@@ -65,20 +67,37 @@ starts flowing within a few seconds.
 
 ```
 Polymarket public APIs
-   Gamma  · market discovery, metadata, resolution status
-   CLOB   · order books, price history
+   Gamma  · segments (tagged events), metadata, resolution status
+   CLOB   · bulk order books, price history
    WS     · live trade pushes
             │
             ▼
    server/  Node + Express + ws
-            holds ONE upstream socket, polls books,
-            simulates paper fills, settles resolved
-            markets, fans state out
+            builds the segment universe, holds ONE upstream
+            socket, bulk-polls books, simulates paper fills,
+            settles resolved markets, fans state out
             │
             │  local WebSocket, one snapshot per second
             ▼
    web/     React + TypeScript + Vite
 ```
+
+**How the board is chosen.** Polymarket has no category field; segments live as tags on an
+*event*, and they overlap — the Fed decision is tagged Economy, Politics, Business and Finance
+at once. So each market is claimed by the first segment that lists it, which makes SEGMENTS an
+editorial order rather than an arbitrary one.
+
+The outcome budget is then split **evenly**, not spent in priority order. Politics and Sports
+alone offer several thousand outcomes between them; filling greedily buries everything else.
+The first attempt did exactly that — nine segments went in, two came out with all 1,500 slots
+and seven came back empty. Each segment now gets an equal share and only what it cannot use is
+handed back to the others.
+
+**Why it scales.** Two things keep a 450-outcome board as cheap as a 40-outcome one. Books are
+fetched in bulk (`POST /books`, 250 tokens a request), so a refresh costs a couple of requests
+rather than one per outcome. And the browser tells the relay which row is open, so only that row
+and anything held carry a full ladder — everything else is sent top-of-book. Focusing a row adds
+about 200 bytes to the snapshot, not 450 rows' worth of depth.
 
 **Why a relay?** A browser cannot hold the exchange feed directly — page CSP and the exchange's
 own origin rules both prevent it. One server-side socket also means ten open tabs cost the
@@ -119,8 +138,10 @@ absolute returns flatter you.
 - Prices are probabilities from 0 to 1. `$0.190` means the market implies a 19% chance.
 - Positions mark at **best bid** — your exit price — so a new position shows a loss immediately.
   That's the spread, not an error.
-- A position with no live book shows `—`, never `$0.00`. Unknown is not zero, and it is excluded
-  from the total rather than silently counted as flat.
+- A position that cannot be marked shows `—`, never `$0.00`, and is excluded from the total
+  rather than silently counted as flat. It says *why*: `no bid` when the book is live but nobody
+  is buying, `no book` when there is no book at all. Those are different facts and only the
+  second is a fault.
 - A closed market shows `awaiting ruling` until the oracle settles it.
 
 ## Configuration
@@ -131,10 +152,11 @@ Everything is optional.
 | --- | --- | --- |
 | `PORT` | `4010` | API / relay port |
 | `HOST` | `127.0.0.1` | Bind address. Set `0.0.0.0` to expose on your LAN — there is no auth |
-| `TOP_MARKETS` | `24` | Markets loaded at startup |
+| `PER_SEGMENT` | `20` | Events pulled per segment at startup |
+| `MAX_OUTCOMES` | `450` | Total outcome budget, split evenly across segments |
 | `BOOK_REFRESH_MS` | `4000` | Order-book poll interval |
 | `SETTLE_CHECK_MS` | `60000` | How often held markets are checked for resolution |
-| `MAX_OUTCOMES` | `200` | Cap on watched outcomes; each costs one book request per refresh |
+| `PROBE_PER_TICK` | `12` | Skipped outcomes re-checked individually per refresh |
 
 ## API
 
@@ -151,7 +173,7 @@ script against it.
 | `GET` | `/api/paper/trades` | Trade log, newest first |
 | `POST` | `/api/paper/settle` | Check held markets for resolution now |
 | `POST` | `/api/paper/reset` | `{ balance? }` — wipe the paper account |
-| `WS` | `/` | The same snapshot as `/api/state`, pushed every second |
+| `WS` | `/` | The same snapshot as `/api/state`, pushed every second. Send `{type:'focus',tokenId}` to get full depth on one row |
 
 ## Security
 
@@ -176,9 +198,9 @@ This project's whole premise is that it cannot lose you money, so the boundary i
 npm test
 ```
 
-80 tests on Node's built-in runner — no test framework, no new dependencies. They cover the
-parts that *compute* rather than relay: the fill walker, position accounting, settlement, and
-payload normalisation. Network code is deliberately not mocked; a mock of an endpoint proves only
+94 tests on Node's built-in runner — no test framework, no new dependencies. They cover the
+parts that *compute* rather than relay: the fill walker, position accounting, settlement,
+segment allocation, and payload normalisation. Network code is deliberately not mocked; a mock of an endpoint proves only
 that the mock matches your belief about it.
 
 The suite is mutation-checked, not assumed good. Each of these turns it red:
@@ -199,6 +221,12 @@ The suite is mutation-checked, not assumed good. Each of these turns it red:
 | Settlement trusts collapsed prices alone | 1 |
 | Settlement accepts a ruling with no winner | 1 |
 | Settlement payout guard removed | 1 |
+| Segment budget spent greedily instead of shared | 2 |
+| Segment budget ceiling removed | 1 |
+| Unused segment share never redistributed | 1 |
+| A market claimed by two segments at once | 1 |
+| One failing segment takes the whole board down | 1 |
+| A one-sided book reported as no book | 1 |
 
 Two of the first tests written passed against deliberately broken code and were rewritten. The
 float-dust case had used a residue that happened to be exactly zero, and the id-collision case
@@ -210,7 +238,8 @@ the very bug it existed to catch. It now freezes the clock.
 ```
 server/src/
   index.js       API, relay, snapshot assembly, settlement loop
-  polymarket.js  public endpoint access, normalisation, resolution detection
+  polymarket.js  segments & budget, endpoint access, normalisation,
+                 resolution detection, quote state
   socket.js      upstream socket with backoff
   paper.js       fill simulation, position accounting, settlement
 server/test/     paper.test.js · polymarket.test.js

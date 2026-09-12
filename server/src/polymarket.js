@@ -30,7 +30,7 @@ export function parseArr(raw) {
  * Gamma splits an outcome across three parallel arrays (`outcomes`,
  * `outcomePrices`, `clobTokenIds`); the UI wants one row per tradeable token.
  */
-export function toRows(market) {
+export function toRows(market, segment) {
   const names = parseArr(market.outcomes).map(String);
   const tokens = parseArr(market.clobTokenIds).map(String);
   const prices = parseArr(market.outcomePrices).map(Number);
@@ -42,7 +42,7 @@ export function toRows(market) {
     question: market.question,
     slug: market.slug,
     outcome: names[i] ?? String(i),
-    category: categorise(market),
+    category: SEGMENT_KEYS.has(segment) ? segment : categorise(market),
     indicative: Number.isFinite(prices[i]) ? prices[i] : null,
     volume24h: market.volume24hr || 0,
     liquidity: market.liquidityNum ?? Number(market.liquidity) ?? 0,
@@ -58,13 +58,37 @@ export function toRows(market) {
 }
 
 /**
- * Bucket a market into a display group. Polymarket has no first-class category
- * field, so this keys off the question text — crude, but it drives grouping
- * the way product families do on a commodities desk.
+ * Polymarket's top-level segments, in priority order.
+ *
+ * Tags on an event run from the canonical ("Politics") to the extremely
+ * specific ("caitlin clark"), and they overlap heavily — the Fed decision
+ * carries Politics, Economy, Business and Finance at once. So a market is
+ * claimed by the first segment in this list that returns it, which makes the
+ * order an editorial decision rather than an arbitrary one: the Fed lands in
+ * ECONOMY because that is the desk that would trade it, not POLITICS.
+ */
+export const SEGMENTS = [
+  { key: 'ECONOMY', slug: 'economy' },
+  { key: 'POLITICS', slug: 'politics' },
+  { key: 'CRYPTO', slug: 'crypto' },
+  { key: 'SPORTS', slug: 'sports' },
+  { key: 'WORLD', slug: 'world' },
+  { key: 'TECH', slug: 'tech' },
+  { key: 'SCIENCE', slug: 'science' },
+  { key: 'CULTURE', slug: 'pop-culture' },
+  { key: 'WEATHER', slug: 'weather' },
+];
+
+const SEGMENT_KEYS = new Set(SEGMENTS.map((s) => s.key));
+
+/**
+ * Fall back to reading the question when a market arrives without a segment —
+ * from search, or from a /watch by id. Crude next to the real tags, but it
+ * beats dropping everything into OTHER.
  */
 export function categorise(market) {
   const text = `${market.question || ''} ${market.slug || ''}`.toLowerCase();
-  if (/\b(fed|rate|cpi|inflation|gdp|recession|jobs|unemployment)\b/.test(text)) return 'MACRO';
+  if (/\b(fed|rate|cpi|inflation|gdp|recession|jobs|unemployment)\b/.test(text)) return 'ECONOMY';
   if (/\b(bitcoin|btc|ethereum|eth|solana|crypto|token)\b/.test(text)) return 'CRYPTO';
   if (/\b(election|president|senate|congress|nominee|parliament|minister)\b/.test(text)) return 'POLITICS';
   if (/\b(vs|game|match|win on|playoffs|cup|league|open)\b/.test(text)) return 'SPORTS';
@@ -131,12 +155,147 @@ export function quoteState(row) {
   return 'empty';
 }
 
-/** Top active markets by 24h volume. */
-export async function fetchTopMarkets(limit = 20) {
-  const url = `${GAMMA}/markets?limit=${limit}&active=true&closed=false&order=volume24hr&ascending=false`;
+/**
+ * Open markets in one segment, busiest first.
+ *
+ * Goes through /events rather than /markets because only an event carries the
+ * tags; its markets are the individual tradeable questions underneath it.
+ */
+export async function fetchSegment(slug, limit = 20) {
+  const url = `${GAMMA}/events?limit=${limit}&active=true&closed=false`
+    + `&order=volume24hr&ascending=false&tag_slug=${encodeURIComponent(slug)}`;
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`Gamma markets: HTTP ${res.status}`);
-  return res.json();
+  if (!res.ok) throw new Error(`Gamma events ${slug}: HTTP ${res.status}`);
+  const events = await res.json();
+  const out = [];
+  for (const event of Array.isArray(events) ? events : []) {
+    for (const market of event.markets || []) {
+      if (market.closed || !market.clobTokenIds) continue;
+      out.push(market);
+    }
+  }
+  return out;
+}
+
+/**
+ * The whole board: every segment, busiest markets first within each.
+ *
+ * Two rules do the work here.
+ *
+ * A market tagged both Economy and Politics is claimed by whichever segment
+ * comes first in SEGMENTS, so it appears exactly once.
+ *
+ * The outcome budget is then split evenly rather than spent in priority order.
+ * That is the whole point: Politics and Sports alone offer several thousand
+ * outcomes between them, so filling the board greedily buries every other
+ * segment — nine segments went in and two came out. Each segment instead gets
+ * an equal share, and only what a segment cannot use is redistributed to those
+ * with more to give.
+ *
+ * A segment whose fetch fails is skipped rather than taking the rest down.
+ */
+export async function fetchUniverse({ perSegment = 20, maxOutcomes = 450, segments = SEGMENTS } = {}) {
+  const results = await Promise.all(segments.map(async (segment) => {
+    try {
+      return { segment, markets: await fetchSegment(segment.slug, perSegment) };
+    } catch {
+      return { segment, markets: [] };
+    }
+  }));
+
+  // Claim in priority order, so each market belongs to one segment only.
+  const claimed = new Set();
+  const queues = results.map(({ segment, markets }) => {
+    const mine = [];
+    for (const market of markets) {
+      const id = String(market.id);
+      if (claimed.has(id)) continue;
+      claimed.add(id);
+      mine.push(market);
+    }
+    return { segment, markets: mine, taken: 0 };
+  });
+
+  const share = Math.max(1, Math.floor(maxOutcomes / Math.max(queues.length, 1)));
+  const out = [];
+  let spent = 0;
+
+  const drain = (queue, ceiling) => {
+    while (queue.markets.length && queue.taken < ceiling && spent < maxOutcomes) {
+      const market = queue.markets[0];
+      const cost = parseArr(market.clobTokenIds).length;
+      if (!cost) { queue.markets.shift(); continue; }
+      if (spent + cost > maxOutcomes) break;
+      queue.markets.shift();
+      queue.taken += cost;
+      spent += cost;
+      out.push({ market, segment: queue.segment.key });
+    }
+  };
+
+  for (const queue of queues) drain(queue, share);
+
+  // Hand the remainder back out a slice at a time, so no single segment
+  // swallows it the way Politics swallowed the whole board before.
+  let progress = true;
+  while (spent < maxOutcomes && progress) {
+    progress = false;
+    for (const queue of queues) {
+      if (!queue.markets.length || spent >= maxOutcomes) continue;
+      const before = spent;
+      drain(queue, queue.taken + share);
+      if (spent > before) progress = true;
+    }
+  }
+
+  return out;
+}
+
+/** Largest token count the CLOB accepts in one /books call. */
+const BOOK_CHUNK = 250;
+
+/**
+ * Books for many tokens at once.
+ *
+ * The bulk endpoint silently omits tokens it has no book for, so the result is
+ * a Map and absence is the signal — the caller decides whether that means
+ * resolved, delisted, or simply never traded. Fetching these one at a time
+ * would be one request per outcome per refresh, which does not survive a board
+ * of several hundred.
+ */
+export async function fetchBooks(tokenIds) {
+  const found = new Map();
+  for (let i = 0; i < tokenIds.length; i += BOOK_CHUNK) {
+    const chunk = tokenIds.slice(i, i + BOOK_CHUNK);
+    let raw;
+    try {
+      const res = await fetch(`${CLOB}/books`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(chunk.map((token_id) => ({ token_id }))),
+      });
+      if (!res.ok) continue;
+      raw = await res.json();
+    } catch {
+      continue; // transient; the caller keeps the previous snapshot
+    }
+    for (const entry of Array.isArray(raw) ? raw : []) {
+      if (!entry || !entry.asset_id) continue;
+      found.set(String(entry.asset_id), {
+        bids: levels(entry.bids, (a, b) => b[0] - a[0]),
+        asks: levels(entry.asks, (a, b) => a[0] - b[0]),
+        last: Number.parseFloat(entry.last_trade_price),
+      });
+    }
+  }
+  return found;
+}
+
+function levels(raw, sort) {
+  return (raw || [])
+    .map((x) => [Number.parseFloat(x.price), Number.parseFloat(x.size)])
+    .filter(([p, sz]) => Number.isFinite(p) && Number.isFinite(sz))
+    .sort(sort);
 }
 
 /** A single market by its Gamma numeric id. */

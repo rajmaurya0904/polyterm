@@ -9,7 +9,9 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 
-import { categorise, isStale, parseArr, quoteState, resolutionOf, toRows } from '../src/polymarket.js';
+import {
+  categorise, fetchUniverse, isStale, parseArr, quoteState, resolutionOf, SEGMENTS, toRows,
+} from '../src/polymarket.js';
 
 describe('parseArr — Gamma encodes arrays as JSON strings', () => {
   it('parses a JSON-encoded array', () => {
@@ -81,8 +83,8 @@ describe('toRows — one row per tradeable token', () => {
 
 describe('categorise', () => {
   const cases = [
-    ['Will the Fed cut rates in March?', 'MACRO'],
-    ['Will CPI come in above 3%?', 'MACRO'],
+    ['Will the Fed cut rates in March?', 'ECONOMY'],
+    ['Will CPI come in above 3%?', 'ECONOMY'],
     ['Will Bitcoin reach $95,000 in September?', 'CRYPTO'],
     ['Will ETH flip BTC?', 'CRYPTO'],
     ['Who will win the 2028 presidential election?', 'POLITICS'],
@@ -103,7 +105,7 @@ describe('categorise', () => {
   });
 
   it('matches on whole words only', () => {
-    // "rate" must not fire on "grateful", or half the board lands in MACRO.
+    // "rate" must not fire on "grateful", or half the board lands in ECONOMY.
     assert.equal(categorise({ question: 'Will anyone be grateful?' }), 'OTHER');
   });
 
@@ -168,6 +170,133 @@ describe('resolutionOf — only a ruled market pays out', () => {
   it('survives a missing market', () => {
     assert.equal(resolutionOf(null), null);
     assert.equal(resolutionOf(undefined), null);
+  });
+});
+
+describe('SEGMENTS — the top-level split', () => {
+  it('has unique keys and slugs', () => {
+    assert.equal(new Set(SEGMENTS.map((s) => s.key)).size, SEGMENTS.length);
+    assert.equal(new Set(SEGMENTS.map((s) => s.slug)).size, SEGMENTS.length);
+  });
+
+  it('puts ECONOMY ahead of POLITICS, because the Fed carries both tags', () => {
+    const keys = SEGMENTS.map((s) => s.key);
+    assert.ok(keys.indexOf('ECONOMY') < keys.indexOf('POLITICS'));
+  });
+});
+
+describe('toRows — segment assignment', () => {
+  const market = {
+    id: 1, question: 'Will the Fed cut rates?', slug: 'fed',
+    outcomes: '["Yes","No"]', clobTokenIds: '["a","b"]', outcomePrices: '["0.5","0.5"]',
+  };
+
+  it('uses the segment it was fetched under', () => {
+    assert.equal(toRows(market, 'SPORTS')[0].category, 'SPORTS', 'real tags beat the regex');
+  });
+
+  it('falls back to reading the question when there is no segment', () => {
+    assert.equal(toRows(market)[0].category, 'ECONOMY');
+  });
+
+  it('ignores a segment that is not a real one', () => {
+    // A caller passing junk must not invent a category the filter cannot show.
+    assert.equal(toRows(market, 'NONSENSE')[0].category, 'ECONOMY');
+  });
+});
+
+describe('fetchUniverse — sharing the board between segments', () => {
+  // Sizes mirror the live imbalance that broke this: politics and sports each
+  // offer thousands of outcomes, weather a few hundred.
+  const huge = (prefix, n) => Array.from({ length: n }, (_, i) => ({
+    id: `${prefix}-${i}`, clobTokenIds: '["a","b"]',
+  }));
+
+  /** Stands in for the network: each segment answers with its own supply. */
+  function fakeFetch(supply) {
+    const segments = Object.keys(supply).map((slug) => ({ key: slug.toUpperCase(), slug }));
+    const original = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+      const slug = new URL(url).searchParams.get('tag_slug');
+      return { ok: true, json: async () => [{ markets: supply[slug] ?? [] }] };
+    };
+    return { segments, restore: () => { globalThis.fetch = original; } };
+  }
+
+  const bySegment = (universe) => universe.reduce((acc, u) => {
+    acc[u.segment] = (acc[u.segment] || 0) + 1;
+    return acc;
+  }, {});
+
+  it('gives every segment a share instead of spending in priority order', async () => {
+    // The regression: greedy filling let the first two segments take all 1500
+    // outcomes and the remaining seven came back empty.
+    const { segments, restore } = fakeFetch({
+      politics: huge('p', 400), sports: huge('s', 400), weather: huge('w', 400),
+    });
+    try {
+      const universe = await fetchUniverse({ maxOutcomes: 60, segments });
+      const counts = bySegment(universe);
+      assert.deepEqual(Object.keys(counts).sort(), ['POLITICS', 'SPORTS', 'WEATHER']);
+      assert.deepEqual(Object.values(counts), [10, 10, 10], 'an even split, not first-come-first-served');
+    } finally { restore(); }
+  });
+
+  it('never exceeds the outcome budget', async () => {
+    const { segments, restore } = fakeFetch({ politics: huge('p', 500), sports: huge('s', 500) });
+    try {
+      const universe = await fetchUniverse({ maxOutcomes: 25, segments });
+      const outcomes = universe.reduce((n, u) => n + parseArr(u.market.clobTokenIds).length, 0);
+      assert.ok(outcomes <= 25, `${outcomes} outcomes exceeds the budget of 25`);
+    } finally { restore(); }
+  });
+
+  it('redistributes what a small segment cannot use', async () => {
+    const { segments, restore } = fakeFetch({
+      politics: huge('p', 100), sports: huge('s', 100), weather: huge('w', 2),
+    });
+    try {
+      const universe = await fetchUniverse({ maxOutcomes: 60, segments });
+      const counts = bySegment(universe);
+      assert.equal(counts.WEATHER, 2, 'takes all it has');
+      assert.equal(counts.POLITICS + counts.SPORTS, 28, 'the unused share goes to the others');
+    } finally { restore(); }
+  });
+
+  it('claims a market for one segment only', async () => {
+    const shared = [{ id: 'dupe', clobTokenIds: '["a","b"]' }];
+    const { segments, restore } = fakeFetch({ economy: shared, politics: shared });
+    try {
+      const universe = await fetchUniverse({ maxOutcomes: 100, segments });
+      assert.equal(universe.length, 1, 'the Fed is tagged both; it appears once');
+      assert.equal(universe[0].segment, 'ECONOMY', 'the earlier segment claims it');
+    } finally { restore(); }
+  });
+
+  it('carries on when a segment fails', async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+      if (new URL(url).searchParams.get('tag_slug') === 'sports') throw new Error('upstream down');
+      return { ok: true, json: async () => [{ markets: huge('p', 10) }] };
+    };
+    try {
+      const universe = await fetchUniverse({
+        maxOutcomes: 40,
+        segments: [{ key: 'SPORTS', slug: 'sports' }, { key: 'POLITICS', slug: 'politics' }],
+      });
+      assert.ok(universe.length > 0, 'politics still loads');
+      assert.deepEqual(Object.keys(bySegment(universe)), ['POLITICS']);
+    } finally { globalThis.fetch = original; }
+  });
+
+  it('skips a market with no tradeable tokens', async () => {
+    const { segments, restore } = fakeFetch({
+      politics: [{ id: 'empty', clobTokenIds: '[]' }, { id: 'real', clobTokenIds: '["a","b"]' }],
+    });
+    try {
+      const universe = await fetchUniverse({ maxOutcomes: 10, segments });
+      assert.deepEqual(universe.map((u) => u.market.id), ['real']);
+    } finally { restore(); }
   });
 });
 

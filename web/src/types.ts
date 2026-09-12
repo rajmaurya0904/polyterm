@@ -14,9 +14,7 @@ export interface Book {
 export interface Row {
   tokenId: string;
   marketId: string;
-  outcomeIndex: number;
   question: string;
-  slug: string;
   outcome: string;
   category: string;
   bid: number | null;
@@ -77,6 +75,8 @@ export interface Snapshot {
   rows: Row[];
   positions: Position[];
   account: Account;
+  /** Segment keys the relay loads, in the order it prioritises them. */
+  segments: string[];
 }
 
 export interface Fill {

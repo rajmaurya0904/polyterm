@@ -13,7 +13,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 
-import { fetchBook, fetchHistory, fetchMarket, fetchTopMarkets, isStale, searchMarkets, toRows } from './polymarket.js';
+import {
+  fetchBook, fetchHistory, fetchMarket, fetchTopMarkets, isStale, resolutionOf, searchMarkets, toRows,
+} from './polymarket.js';
 import { createMarketSocket } from './socket.js';
 import { createPaperStore } from './paper.js';
 
@@ -28,6 +30,10 @@ const BROADCAST_MS = 1000;
 // Every watched outcome costs one book request per refresh, so the watch set
 // has to be bounded or a loop of /api/watch calls becomes a request storm.
 const MAX_OUTCOMES = Number(process.env.MAX_OUTCOMES) || 200;
+// How often held markets are asked whether the oracle has ruled. Resolution
+// takes hours to days, so a minute is generous; it is one request per held
+// market, not per outcome.
+const SETTLE_CHECK_MS = Number(process.env.SETTLE_CHECK_MS) || 60_000;
 
 const ID_RE = /^\d{1,80}$/; // Gamma market ids and CLOB token ids are decimal strings
 const INTERVALS = new Set(['1h', '6h', '1d', '1w', '1m', 'max']);
@@ -96,6 +102,57 @@ async function refreshBooks() {
   }));
 }
 
+/**
+ * Settle positions whose market has resolved.
+ *
+ * A resolved market's book is simply gone upstream, so without this a held
+ * position would sit unmarked forever and the account would never see the
+ * $1.00 or $0.00 it is actually worth. Asks Gamma about each held market and
+ * pays out any that the oracle has ruled on.
+ */
+let settling = false;
+async function checkSettlements() {
+  if (settling) return 0;
+  settling = true;
+  let settled = 0;
+  try {
+    const held = paper.positions();
+    const marketIds = [...new Set(held.map((p) => p.marketId))];
+    for (const marketId of marketIds) {
+      let resolution;
+      try {
+        resolution = resolutionOf(await fetchMarket(marketId));
+      } catch {
+        continue; // transient; next tick will ask again
+      }
+      if (!resolution) continue;
+
+      for (const position of held.filter((p) => p.marketId === marketId)) {
+        const payout = resolution.payouts[position.outcomeIndex];
+        if (payout !== 0 && payout !== 1) continue;
+        const result = paper.settle(position.tokenId, payout);
+        if (!result.ok) continue;
+        settled += 1;
+        console.log(
+          `Settled ${position.shares} × "${position.outcome}" on "${position.question}" at $${payout}.00`
+          + ` (realized ${result.trade.realized >= 0 ? '+' : ''}${result.trade.realized.toFixed(2)})`,
+        );
+      }
+      // Every row of this market now has a known terminal price.
+      for (const row of rowList()) {
+        if (row.marketId !== marketId) continue;
+        row.resolved = true;
+        row.payout = resolution.payouts[row.outcomeIndex] ?? null;
+        row.book = null; row.bid = null; row.ask = null;
+      }
+    }
+  } finally {
+    settling = false;
+  }
+  if (settled) broadcast();
+  return settled;
+}
+
 function snapshot() {
   const list = rowList();
   const marked = paper.positions().map((p) => {
@@ -105,6 +162,7 @@ function snapshot() {
       ...p,
       mark,
       unrealized: mark != null ? (mark - p.avgCost) * p.shares : null,
+      resolved: row?.resolved ?? false,
     };
   });
 
@@ -129,6 +187,7 @@ function snapshot() {
       volume24h: r.volume24h,
       liquidity: r.liquidity,
       resolved: r.resolved,
+      payout: r.payout ?? null,
       book: r.book ? { bids: r.book.bids.slice(0, 8), asks: r.book.asks.slice(0, 8) } : null,
       held: marked.some((p) => p.tokenId === r.tokenId),
     })),
@@ -206,6 +265,12 @@ app.post('/api/paper/order', (req, res) => {
 
 app.get('/api/paper/trades', (_req, res) => res.json({ trades: paper.trades() }));
 
+/** Ask now rather than waiting for the next scheduled check. */
+app.post('/api/paper/settle', async (_req, res) => {
+  const settled = await checkSettlements();
+  res.json({ settled });
+});
+
 app.post('/api/paper/reset', (req, res) => {
   const raw = req.body?.balance;
   let balance;
@@ -277,7 +342,12 @@ async function main() {
   socket.start(rowList().map((r) => r.tokenId));
   await refreshBooks();
 
+  // A market may have resolved while this process was down.
+  const settledAtStart = await checkSettlements();
+  if (settledAtStart) console.log(`Settled ${settledAtStart} position(s) that resolved while offline.`);
+
   setInterval(refreshBooks, BOOK_REFRESH_MS);
+  setInterval(checkSettlements, SETTLE_CHECK_MS);
   setInterval(broadcast, BROADCAST_MS);
 
   server.listen(PORT, HOST, () => {

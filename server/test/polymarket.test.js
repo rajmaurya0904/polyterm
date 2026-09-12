@@ -9,7 +9,7 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 
-import { categorise, isStale, parseArr, toRows } from '../src/polymarket.js';
+import { categorise, isStale, parseArr, resolutionOf, toRows } from '../src/polymarket.js';
 
 describe('parseArr — Gamma encodes arrays as JSON strings', () => {
   it('parses a JSON-encoded array', () => {
@@ -109,6 +109,65 @@ describe('categorise', () => {
 
   it('survives a market with no text at all', () => {
     assert.equal(categorise({}), 'OTHER');
+  });
+});
+
+describe('resolutionOf — only a ruled market pays out', () => {
+  // Shapes copied from live Gamma responses, not invented.
+  const resolved = {
+    closed: true, active: true, umaResolutionStatus: 'resolved',
+    resolvedBy: '0x65070BE9', outcomes: '["A","B"]', outcomePrices: '["0", "1"]',
+  };
+  const open = {
+    closed: false, active: true, resolvedBy: '0x69c47De9',
+    outcomes: '["Yes","No"]', outcomePrices: '["0.195", "0.805"]',
+  };
+
+  it('pays the winner 1 and the loser 0', () => {
+    assert.deepEqual(resolutionOf(resolved), { payouts: [0, 1] });
+  });
+
+  it('is null for an open market', () => {
+    assert.equal(resolutionOf(open), null);
+  });
+
+  it('ignores resolvedBy — it is the oracle address, present from birth', () => {
+    assert.equal(resolutionOf({ ...open, resolvedBy: '0xabc' }), null);
+  });
+
+  it('does not settle on closed alone — trading halts before the ruling', () => {
+    assert.equal(resolutionOf({ ...open, closed: true }), null);
+  });
+
+  it('does not settle on collapsed prices alone without the ruling', () => {
+    // Trading can halt with the last prints at 0 and 1 before the oracle has
+    // ruled. The prices look final; only the status says they are.
+    const halted = { ...open, closed: true, outcomePrices: '["0", "1"]' };
+    assert.equal(resolutionOf(halted), null);
+  });
+
+  it('does not settle on the status alone while prices are still fractional', () => {
+    // Settling here would pay a probability instead of a payout.
+    assert.equal(resolutionOf({ ...open, umaResolutionStatus: 'resolved' }), null);
+  });
+
+  it('handles a multi-outcome market with a single winner', () => {
+    const multi = { ...resolved, outcomes: '["A","B","C"]', outcomePrices: '["0","0","1"]' };
+    assert.deepEqual(resolutionOf(multi), { payouts: [0, 0, 1] });
+  });
+
+  it('refuses a ruling with no winner', () => {
+    assert.equal(resolutionOf({ ...resolved, outcomePrices: '["0","0"]' }), null);
+  });
+
+  it('refuses a ruling with unparseable prices', () => {
+    assert.equal(resolutionOf({ ...resolved, outcomePrices: 'nope' }), null);
+    assert.equal(resolutionOf({ ...resolved, outcomePrices: '["x","1"]' }), null);
+  });
+
+  it('survives a missing market', () => {
+    assert.equal(resolutionOf(null), null);
+    assert.equal(resolutionOf(undefined), null);
   });
 });
 

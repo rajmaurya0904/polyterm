@@ -24,12 +24,15 @@ export function HistoryView({ trades, loading }: { trades: Trade[]; loading: boo
   const realized = trades.reduce((sum, t) => sum + (t.realized || 0), 0);
   const volume = trades.reduce((sum, t) => sum + t.cost, 0);
   const buys = trades.filter((t) => t.side === 'buy').length;
+  const settled = trades.filter((t) => t.settlement).length;
+  const sells = trades.length - buys - settled;
 
   return (
     <div className="stack">
       <div className="stat-row">
         <Stat label="Trades" value={String(trades.length)} />
-        <Stat label="Buys / Sells" value={`${buys} / ${trades.length - buys}`} />
+        <Stat label="Buys / Sells" value={`${buys} / ${sells}`} />
+        <Stat label="Settled" value={String(settled)} />
         <Stat label="Turnover" value={usd(volume)} />
         <Stat label="Realized" value={usd(realized)} tone={realized >= 0 ? 'up' : 'down'} />
       </div>
@@ -73,7 +76,11 @@ function TradeRow({ trade, open, onToggle }: { trade: Trade; open: boolean; onTo
     <>
       <tr className="clickable" onClick={onToggle}>
         <td className="dim">{when.toLocaleString()}</td>
-        <td><span className={trade.side === 'buy' ? 'badge bid' : 'badge ofr'}>{trade.side.toUpperCase()}</span></td>
+        <td>
+          {trade.settlement
+            ? <span className="badge mkt" title={`Paid out at $${trade.avg.toFixed(2)} per share by resolution`}>SETTLED</span>
+            : <span className={trade.side === 'buy' ? 'badge bid' : 'badge ofr'}>{trade.side.toUpperCase()}</span>}
+        </td>
         <td className="truncate wide" title={trade.question}>{trade.question}</td>
         <td className="dim">{trade.outcome}</td>
         <td className="num">

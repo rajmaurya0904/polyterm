@@ -181,6 +181,46 @@ export function createPaperStore(filePath) {
       return { ok: true, trade };
     },
 
+    /**
+     * Settle a held position at its resolution payout — $1.00 per share on
+     * the winning outcome, $0.00 on a loser. Recorded as a sell so position
+     * netting needs no special case, flagged so the UI can tell it apart from
+     * a trade the user chose to make.
+     *
+     * @param {string} tokenId
+     * @param {0|1} payout
+     */
+    settle(tokenId, payout) {
+      if (payout !== 0 && payout !== 1) return { ok: false, reason: 'payout must be 0 or 1' };
+      const held = positions().find((p) => p.tokenId === tokenId);
+      if (!held || held.shares <= 0) return { ok: false, reason: 'no position to settle' };
+
+      const proceeds = payout * held.shares;
+      state.balance += proceeds;
+
+      const trade = {
+        id: nextId(),
+        at: new Date().toISOString(),
+        tokenId: held.tokenId,
+        marketId: held.marketId,
+        outcomeIndex: held.outcomeIndex,
+        question: held.question,
+        outcome: held.outcome,
+        side: 'sell',
+        settlement: true,
+        shares: held.shares,
+        filled: held.shares,
+        unfilled: 0,
+        avg: payout,
+        cost: proceeds,
+        fills: [{ price: payout, size: held.shares }],
+        realized: (payout - held.avgCost) * held.shares,
+      };
+      state.trades.push(trade);
+      persist();
+      return { ok: true, trade };
+    },
+
     reset(startingBalance = DEFAULT_BALANCE) {
       state = { balance: startingBalance, startingBalance, trades: [] };
       persist();

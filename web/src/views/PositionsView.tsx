@@ -55,9 +55,31 @@ export function PositionsView({ positions, account, onSelect, onChanged }: Props
     onChanged();
   };
 
+  const [checking, setChecking] = useState(false);
+  const checkSettlements = async () => {
+    setChecking(true);
+    setMessage(null);
+    try {
+      const res = await fetch('/api/paper/settle', { method: 'POST' });
+      const data = await res.json();
+      setMessage({
+        kind: 'ok',
+        text: data.settled
+          ? `Settled ${data.settled} position${data.settled > 1 ? 's' : ''}`
+          : 'Nothing has resolved yet',
+      });
+      if (data.settled) onChanged();
+    } catch (err) {
+      setMessage({ kind: 'error', text: (err as Error).message });
+    } finally {
+      setChecking(false);
+    }
+  };
+
   const known = positions.filter((p) => p.unrealized != null);
   const total = known.reduce((sum, p) => sum + (p.unrealized ?? 0), 0);
   const unmarked = positions.length - known.length;
+  const awaiting = positions.filter((p) => p.resolved).length;
 
   return (
     <div className="stack">
@@ -74,7 +96,16 @@ export function PositionsView({ positions, account, onSelect, onChanged }: Props
       <Panel
         title={`Open positions · ${positions.length}`}
         flush
-        actions={<button className="btn" onClick={reset}>Reset account</button>}
+        actions={
+          <div className="form-row">
+            {awaiting > 0 && (
+              <button className="btn" disabled={checking} onClick={checkSettlements}>
+                {checking ? 'Checking…' : 'Check settlements'}
+              </button>
+            )}
+            <button className="btn" onClick={reset}>Reset account</button>
+          </div>
+        }
       >
         {!positions.length ? (
           <div className="empty">No open positions — buy something from the Board</div>
@@ -100,7 +131,11 @@ export function PositionsView({ positions, account, onSelect, onChanged }: Props
                     <td className="dim">{p.outcome}</td>
                     <td className="num">{qty(p.shares)}</td>
                     <td className="num dim">{px(p.avgCost)}</td>
-                    <td className="num">{p.mark != null ? px(p.mark) : <span className="faint">no book</span>}</td>
+                    <td className="num">
+                      {p.mark != null
+                        ? px(p.mark)
+                        : <span className="faint">{p.resolved ? 'awaiting ruling' : 'no book'}</span>}
+                    </td>
                     <td className="num dim">{usd(p.cost)}</td>
                     <td className={`num ${p.unrealized == null ? 'faint' : p.unrealized >= 0 ? 'up' : 'down'}`}>
                       {p.unrealized == null ? '—' : usd(p.unrealized)}
@@ -110,7 +145,11 @@ export function PositionsView({ positions, account, onSelect, onChanged }: Props
                         className="btn"
                         disabled={closing === p.tokenId || p.mark == null}
                         onClick={(e) => { e.stopPropagation(); void close(p); }}
-                        title={p.mark == null ? 'No live book to sell into' : 'Sell the whole position at market'}
+                        title={
+                          p.resolved
+                            ? 'Market closed — settles at $1.00 or $0.00 once the oracle rules'
+                            : p.mark == null ? 'No live book to sell into' : 'Sell the whole position at market'
+                        }
                       >
                         {closing === p.tokenId ? 'Closing…' : 'Close'}
                       </button>
@@ -123,9 +162,16 @@ export function PositionsView({ positions, account, onSelect, onChanged }: Props
         )}
       </Panel>
 
-      {unmarked > 0 && (
+      {awaiting > 0 && (
+        <div className="notice ok">
+          {awaiting} position{awaiting > 1 ? 's are' : ' is'} in a closed market. Once the oracle rules,
+          each share pays $1.00 on the winning outcome or $0.00 otherwise and the position settles automatically
+          (checked every minute, or now with the button above).
+        </div>
+      )}
+      {unmarked - awaiting > 0 && (
         <div className="notice error">
-          {unmarked} position{unmarked > 1 ? 's have' : ' has'} no live book and cannot be marked.
+          {unmarked - awaiting} position{unmarked - awaiting > 1 ? 's have' : ' has'} no live book and cannot be marked.
           They are excluded from the unrealized total rather than counted as flat.
         </div>
       )}

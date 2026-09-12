@@ -23,6 +23,8 @@ export interface Row {
   volume24h: number;
   liquidity: number;
   resolved: boolean;
+  /** Terminal price once the oracle has ruled: 1 for the winner, 0 otherwise. */
+  payout: number | null;
   book: Book | null;
   held: boolean;
 }
@@ -39,6 +41,8 @@ export interface Position {
   mark: number | null;
   /** null when no live book exists — unknown, not zero. */
   unrealized: number | null;
+  /** Market has closed upstream; the position settles once the oracle rules. */
+  resolved: boolean;
 }
 
 export interface Account {
@@ -70,6 +74,8 @@ export interface Trade {
   question: string;
   outcome: string;
   side: 'buy' | 'sell';
+  /** Paid out at resolution rather than sold into the book. */
+  settlement?: boolean;
   shares: number;
   filled: number;
   unfilled: number;

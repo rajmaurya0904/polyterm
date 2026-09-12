@@ -84,6 +84,26 @@ export function isStale(row) {
   return row.last < row.bid - 0.001 || row.last > row.ask + 0.001;
 }
 
+/**
+ * Settlement payouts for a market, or null while it is still open.
+ *
+ * Gamma exposes several near-signals that are not the signal. `closed` flips
+ * when trading halts, which can be days before the oracle rules. `resolvedBy`
+ * is the oracle's address and is present on every market from birth. What
+ * actually marks a ruling is `umaResolutionStatus === 'resolved'` together
+ * with `outcomePrices` collapsing to exactly 0 or 1 per outcome — both are
+ * required, because a status flip with prices still fractional would settle
+ * positions at a probability rather than a payout.
+ */
+export function resolutionOf(market) {
+  if (!market || market.umaResolutionStatus !== 'resolved') return null;
+  const prices = parseArr(market.outcomePrices).map(Number);
+  if (!prices.length) return null;
+  if (!prices.every((p) => p === 0 || p === 1)) return null;
+  if (!prices.some((p) => p === 1)) return null;
+  return { payouts: prices };
+}
+
 /** Top active markets by 24h volume. */
 export async function fetchTopMarkets(limit = 20) {
   const url = `${GAMMA}/markets?limit=${limit}&active=true&closed=false&order=volume24hr&ascending=false`;

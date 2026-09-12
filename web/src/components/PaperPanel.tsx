@@ -136,7 +136,11 @@ export function Positions({ positions, onSelect }: { positions: Position[]; onSe
               </td>
               <td className="num">{qty(p.shares)}</td>
               <td className="num dim">{px(p.avgCost)}</td>
-              <td className="num">{p.mark != null ? px(p.mark) : <span className="faint">no book</span>}</td>
+              <td className="num">
+                {p.mark != null
+                  ? px(p.mark)
+                  : <span className="faint">{p.resolved ? 'awaiting ruling' : 'no book'}</span>}
+              </td>
               <td className={`num ${p.unrealized == null ? 'faint' : p.unrealized >= 0 ? 'up' : 'down'}`}>
                 {p.unrealized == null ? '—' : usd(p.unrealized)}
               </td>

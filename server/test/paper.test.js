@@ -266,6 +266,98 @@ describe('place — accepted orders', () => {
   });
 });
 
+describe('settle — payout at resolution', () => {
+  const reject = (result, needle) => {
+    assert.equal(result.ok, false);
+    assert.match(result.reason, needle);
+  };
+
+  it('pays $1.00 a share on the winning outcome', () => {
+    const s = store();
+    s.place({ row: row(BOOK), side: 'buy', shares: 100 }); // 100 @ 0.50 = 50.00
+    const res = s.settle('tok-1', 1);
+
+    assert.equal(res.ok, true);
+    assert.equal(res.trade.settlement, true);
+    assert.equal(res.trade.realized.toFixed(2), '50.00', '(1.00 - 0.50) * 100');
+    assert.equal(s.state.balance.toFixed(2), '10050.00', 'cash back plus the win');
+    assert.deepEqual(s.positions(), [], 'nothing left to hold');
+  });
+
+  it('pays nothing on a losing outcome and books the whole cost as a loss', () => {
+    const s = store();
+    s.place({ row: row(BOOK), side: 'buy', shares: 100 });
+    const res = s.settle('tok-1', 0);
+
+    assert.equal(res.ok, true);
+    assert.equal(res.trade.realized.toFixed(2), '-50.00');
+    assert.equal(s.state.balance.toFixed(2), '9950.00', 'no proceeds, cash stays where the buy left it');
+    assert.deepEqual(s.positions(), []);
+    assert.equal(s.state.deployed, 0, 'nothing is still deployed after a total loss');
+  });
+
+  it('settles the whole position, including shares bought at different prices', () => {
+    const s = store();
+    s.place({ row: row(BOOK), side: 'buy', shares: 100 });                 // 100 @ 0.50
+    s.place({ row: row({ ...BOOK, asks: [[0.60, 100]] }), side: 'buy', shares: 100 }); // 100 @ 0.60
+    const res = s.settle('tok-1', 1);
+    assert.equal(res.trade.filled, 200);
+    assert.equal(res.trade.realized.toFixed(2), '90.00', '200 * (1.00 - 0.55)');
+  });
+
+  it('records the settlement so the ledger stays the single source of truth', () => {
+    const s = store();
+    s.place({ row: row(BOOK), side: 'buy', shares: 10 });
+    s.settle('tok-1', 1);
+    const [latest] = s.trades();
+    assert.equal(latest.settlement, true);
+    assert.equal(latest.side, 'sell', 'netting treats it as an exit');
+    assert.deepEqual(latest.fills, [{ price: 1, size: 10 }]);
+    assert.equal(latest.unfilled, 0, 'resolution never partially fills');
+  });
+
+  it('refuses a payout that is not 0 or 1', () => {
+    const s = store();
+    s.place({ row: row(BOOK), side: 'buy', shares: 10 });
+    for (const payout of [0.5, -1, 2, NaN, '1', null, undefined]) {
+      reject(s.settle('tok-1', payout), /payout must be 0 or 1/);
+    }
+    assert.equal(s.positions()[0].shares, 10, 'a refused settle changes nothing');
+  });
+
+  it('refuses to settle a token that is not held', () => {
+    reject(store().settle('tok-1', 1), /no position to settle/);
+  });
+
+  it('cannot settle the same position twice', () => {
+    const s = store();
+    s.place({ row: row(BOOK), side: 'buy', shares: 10 });
+    assert.equal(s.settle('tok-1', 1).ok, true);
+    reject(s.settle('tok-1', 1), /no position to settle/);
+    assert.equal(s.state.balance.toFixed(2), '10005.00', 'paid exactly once');
+  });
+
+  it('leaves other tokens alone', () => {
+    const s = store();
+    s.place({ row: row(BOOK, 'winner'), side: 'buy', shares: 10 });
+    s.place({ row: row(BOOK, 'other'), side: 'buy', shares: 10 });
+    s.settle('winner', 1);
+    assert.deepEqual(s.positions().map((p) => p.tokenId), ['other']);
+  });
+
+  it('survives a reload', () => {
+    const file = path.join(tmpRoot, 'settled.json');
+    const first = createPaperStore(file);
+    first.place({ row: row(BOOK), side: 'buy', shares: 10 });
+    first.settle('tok-1', 1);
+
+    const second = createPaperStore(file);
+    assert.deepEqual(second.positions(), []);
+    assert.equal(second.state.realized.toFixed(2), '5.00');
+    assert.equal(second.trades()[0].settlement, true);
+  });
+});
+
 describe('persistence', () => {
   it('survives a reload from disk', () => {
     const file = path.join(tmpRoot, 'reload.json');

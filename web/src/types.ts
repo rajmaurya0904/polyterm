@@ -1,5 +1,11 @@
 export type Level = [price: number, size: number];
 
+/**
+ * Why a price is or isn't available. `ask-only` is the one that matters to a
+ * holder: the book is live, but nobody is bidding, so there is no exit price.
+ */
+export type Quote = 'two-sided' | 'bid-only' | 'ask-only' | 'empty' | 'none' | 'gone';
+
 export interface Book {
   bids: Level[];
   asks: Level[];
@@ -25,6 +31,7 @@ export interface Row {
   resolved: boolean;
   /** Terminal price once the oracle has ruled: 1 for the winner, 0 otherwise. */
   payout: number | null;
+  quote: Quote;
   book: Book | null;
   held: boolean;
 }
@@ -43,6 +50,16 @@ export interface Position {
   unrealized: number | null;
   /** Market has closed upstream; the position settles once the oracle rules. */
   resolved: boolean;
+  /** Why there is no mark, when there isn't one. */
+  quote: Quote;
+}
+
+/** Plain-English reason a position cannot be marked, or null when it can. */
+export function unmarkableReason(p: Position): string | null {
+  if (p.mark != null) return null;
+  if (p.resolved) return 'awaiting ruling';
+  if (p.quote === 'ask-only' || p.quote === 'empty') return 'no bid';
+  return 'no book';
 }
 
 export interface Account {

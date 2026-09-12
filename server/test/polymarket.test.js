@@ -9,7 +9,7 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 
-import { categorise, isStale, parseArr, resolutionOf, toRows } from '../src/polymarket.js';
+import { categorise, isStale, parseArr, quoteState, resolutionOf, toRows } from '../src/polymarket.js';
 
 describe('parseArr — Gamma encodes arrays as JSON strings', () => {
   it('parses a JSON-encoded array', () => {
@@ -168,6 +168,28 @@ describe('resolutionOf — only a ruled market pays out', () => {
   it('survives a missing market', () => {
     assert.equal(resolutionOf(null), null);
     assert.equal(resolutionOf(undefined), null);
+  });
+});
+
+describe('quoteState — why there is no price', () => {
+  const book = (bids, asks) => ({ resolved: false, book: { bids, asks } });
+  const L = [[0.5, 100]];
+
+  it('is two-sided when both sides have resting size', () => {
+    assert.equal(quoteState(book(L, L)), 'two-sided');
+  });
+
+  it('distinguishes a one-sided book from a missing one', () => {
+    // The case that mattered: 80 asks and nobody bidding is not "no book".
+    assert.equal(quoteState(book([], L)), 'ask-only');
+    assert.equal(quoteState(book(L, [])), 'bid-only');
+    assert.equal(quoteState(book([], [])), 'empty');
+    assert.equal(quoteState({ resolved: false, book: null }), 'none');
+  });
+
+  it('reports a resolved market as gone whatever the book says', () => {
+    assert.equal(quoteState({ resolved: true, book: null }), 'gone');
+    assert.equal(quoteState({ resolved: true, book: { bids: L, asks: L } }), 'gone');
   });
 });
 

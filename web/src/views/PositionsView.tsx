@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Panel } from '../components/Panel';
 import { AccountSummary } from '../components/PaperPanel';
 import { px, qty, usd } from '../format';
-import type { Account, Position } from '../types';
+import { unmarkableReason, type Account, type Position } from '../types';
 
 interface Props {
   positions: Position[];
@@ -78,8 +78,9 @@ export function PositionsView({ positions, account, onSelect, onChanged }: Props
 
   const known = positions.filter((p) => p.unrealized != null);
   const total = known.reduce((sum, p) => sum + (p.unrealized ?? 0), 0);
-  const unmarked = positions.length - known.length;
-  const awaiting = positions.filter((p) => p.resolved).length;
+  const awaiting = positions.filter((p) => unmarkableReason(p) === 'awaiting ruling');
+  const noBid = positions.filter((p) => unmarkableReason(p) === 'no bid');
+  const noBook = positions.filter((p) => unmarkableReason(p) === 'no book');
 
   return (
     <div className="stack">
@@ -87,7 +88,11 @@ export function PositionsView({ positions, account, onSelect, onChanged }: Props
         <Stat label="Cash" value={usd(account.balance)} />
         <Stat label="Deployed" value={usd(account.deployed)} />
         <Stat label="Realized" value={usd(account.realized)} tone={account.realized >= 0 ? 'up' : 'down'} />
-        <Stat label="Unrealized" value={usd(total)} tone={total >= 0 ? 'up' : 'down'} />
+        <Stat
+          label="Unrealized"
+          value={known.length ? usd(total) : '—'}
+          tone={known.length ? (total >= 0 ? 'up' : 'down') : undefined}
+        />
         <Stat label="Equity" value={usd(account.equity)} />
       </div>
 
@@ -98,7 +103,7 @@ export function PositionsView({ positions, account, onSelect, onChanged }: Props
         flush
         actions={
           <div className="form-row">
-            {awaiting > 0 && (
+            {(awaiting.length > 0 || noBid.length > 0) && (
               <button className="btn" disabled={checking} onClick={checkSettlements}>
                 {checking ? 'Checking…' : 'Check settlements'}
               </button>
@@ -132,9 +137,7 @@ export function PositionsView({ positions, account, onSelect, onChanged }: Props
                     <td className="num">{qty(p.shares)}</td>
                     <td className="num dim">{px(p.avgCost)}</td>
                     <td className="num">
-                      {p.mark != null
-                        ? px(p.mark)
-                        : <span className="faint">{p.resolved ? 'awaiting ruling' : 'no book'}</span>}
+                      {p.mark != null ? px(p.mark) : <span className="faint">{unmarkableReason(p)}</span>}
                     </td>
                     <td className="num dim">{usd(p.cost)}</td>
                     <td className={`num ${p.unrealized == null ? 'faint' : p.unrealized >= 0 ? 'up' : 'down'}`}>
@@ -145,11 +148,7 @@ export function PositionsView({ positions, account, onSelect, onChanged }: Props
                         className="btn"
                         disabled={closing === p.tokenId || p.mark == null}
                         onClick={(e) => { e.stopPropagation(); void close(p); }}
-                        title={
-                          p.resolved
-                            ? 'Market closed — settles at $1.00 or $0.00 once the oracle rules'
-                            : p.mark == null ? 'No live book to sell into' : 'Sell the whole position at market'
-                        }
+                        title={closeHint(p)}
                       >
                         {closing === p.tokenId ? 'Closing…' : 'Close'}
                       </button>
@@ -162,17 +161,25 @@ export function PositionsView({ positions, account, onSelect, onChanged }: Props
         )}
       </Panel>
 
-      {awaiting > 0 && (
+      {awaiting.length > 0 && (
         <div className="notice ok">
-          {awaiting} position{awaiting > 1 ? 's are' : ' is'} in a closed market. Once the oracle rules,
+          {plural(awaiting.length, 'position is', 'positions are')} in a closed market. Once the oracle rules,
           each share pays $1.00 on the winning outcome or $0.00 otherwise and the position settles automatically
-          (checked every minute, or now with the button above).
+          — checked every minute, or now with the button above.
         </div>
       )}
-      {unmarked - awaiting > 0 && (
+      {noBid.length > 0 && (
+        <div className="notice ok">
+          {plural(noBid.length, 'position has', 'positions have')} a live book with offers but no bids, so there is
+          nothing to sell into and no exit price to mark against. That is the market pricing the outcome at
+          effectively nothing, not missing data — it is left out of the unrealized total rather than counted as a
+          loss it has not taken. It settles at $1.00 or $0.00 when the market resolves.
+        </div>
+      )}
+      {noBook.length > 0 && (
         <div className="notice error">
-          {unmarked - awaiting} position{unmarked - awaiting > 1 ? 's have' : ' has'} no live book and cannot be marked.
-          They are excluded from the unrealized total rather than counted as flat.
+          {plural(noBook.length, 'position has', 'positions have')} no order book at all — the last fetch returned
+          nothing. Excluded from the unrealized total rather than counted as flat.
         </div>
       )}
 
@@ -181,6 +188,17 @@ export function PositionsView({ positions, account, onSelect, onChanged }: Props
       </Panel>
     </div>
   );
+}
+
+const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
+function closeHint(p: Position): string {
+  switch (unmarkableReason(p)) {
+    case 'awaiting ruling': return 'Market closed — settles at $1.00 or $0.00 once the oracle rules';
+    case 'no bid': return 'Nobody is bidding on this outcome, so there is nothing to sell into';
+    case 'no book': return 'No live book to sell into';
+    default: return 'Sell the whole position at market';
+  }
 }
 
 function Stat({ label, value, tone }: { label: string; value: string; tone?: 'up' | 'down' }) {

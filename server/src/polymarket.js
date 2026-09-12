@@ -104,6 +104,33 @@ export function resolutionOf(market) {
   return { payouts: prices };
 }
 
+/**
+ * What the book can actually tell you about a price right now.
+ *
+ * A holder cares about one thing: is there a bid to sell into. "No book at
+ * all" and "a book with eighty asks and nobody buying" both leave a position
+ * unmarkable, but they are not the same fact and must not carry the same
+ * label — the first is a gap in our data, the second is the market telling
+ * you what your position is worth.
+ *
+ *   gone       resolved upstream; the book has been withdrawn
+ *   none       never fetched, or the last fetch failed
+ *   empty      book exists, both sides bare
+ *   ask-only   offers but no bids — nothing to sell into
+ *   bid-only   bids but no offers — nothing to buy
+ *   two-sided  a real market
+ */
+export function quoteState(row) {
+  if (row.resolved) return 'gone';
+  if (!row.book) return 'none';
+  const bids = row.book.bids.length > 0;
+  const asks = row.book.asks.length > 0;
+  if (bids && asks) return 'two-sided';
+  if (asks) return 'ask-only';
+  if (bids) return 'bid-only';
+  return 'empty';
+}
+
 /** Top active markets by 24h volume. */
 export async function fetchTopMarkets(limit = 20) {
   const url = `${GAMMA}/markets?limit=${limit}&active=true&closed=false&order=volume24hr&ascending=false`;

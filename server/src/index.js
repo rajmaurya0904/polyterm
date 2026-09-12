@@ -14,7 +14,8 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 
 import {
-  fetchBook, fetchHistory, fetchMarket, fetchTopMarkets, isStale, resolutionOf, searchMarkets, toRows,
+  fetchBook, fetchHistory, fetchMarket, fetchTopMarkets, isStale, quoteState, resolutionOf,
+  searchMarkets, toRows,
 } from './polymarket.js';
 import { createMarketSocket } from './socket.js';
 import { createPaperStore } from './paper.js';
@@ -163,6 +164,8 @@ function snapshot() {
       mark,
       unrealized: mark != null ? (mark - p.avgCost) * p.shares : null,
       resolved: row?.resolved ?? false,
+      // Why there is no mark, so the UI can say which it is.
+      quote: row ? quoteState(row) : 'none',
     };
   });
 
@@ -188,6 +191,7 @@ function snapshot() {
       liquidity: r.liquidity,
       resolved: r.resolved,
       payout: r.payout ?? null,
+      quote: quoteState(r),
       book: r.book ? { bids: r.book.bids.slice(0, 8), asks: r.book.asks.slice(0, 8) } : null,
       held: marked.some((p) => p.tokenId === r.tokenId),
     })),

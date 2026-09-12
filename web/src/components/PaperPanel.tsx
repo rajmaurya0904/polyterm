@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { Account, Position, Row } from '../types';
+import { unmarkableReason, type Account, type Position, type Row } from '../types';
 import { px, qty, usd } from '../format';
 
 interface TicketProps {
@@ -137,9 +137,7 @@ export function Positions({ positions, onSelect }: { positions: Position[]; onSe
               <td className="num">{qty(p.shares)}</td>
               <td className="num dim">{px(p.avgCost)}</td>
               <td className="num">
-                {p.mark != null
-                  ? px(p.mark)
-                  : <span className="faint">{p.resolved ? 'awaiting ruling' : 'no book'}</span>}
+                {p.mark != null ? px(p.mark) : <span className="faint">{unmarkableReason(p)}</span>}
               </td>
               <td className={`num ${p.unrealized == null ? 'faint' : p.unrealized >= 0 ? 'up' : 'down'}`}>
                 {p.unrealized == null ? '—' : usd(p.unrealized)}

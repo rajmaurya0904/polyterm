@@ -56,6 +56,8 @@ All optional:
 | `PORT` | `4010` | API / relay port |
 | `TOP_MARKETS` | `24` | Markets loaded at startup |
 | `BOOK_REFRESH_MS` | `4000` | Order-book poll interval |
+| `HOST` | `127.0.0.1` | Bind address. Set `0.0.0.0` to expose on your LAN — there is no auth |
+| `MAX_OUTCOMES` | `200` | Cap on watched outcomes (each costs one book request per refresh) |
 
 ## Architecture
 

@@ -19,9 +19,18 @@ import { createPaperStore } from './paper.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 4010;
+// Loopback by default. Set HOST=0.0.0.0 to expose on the LAN — there is no
+// auth, so anyone who can reach the port can move the paper account.
+const HOST = process.env.HOST || '127.0.0.1';
 const TOP_N = Number(process.env.TOP_MARKETS) || 24;
 const BOOK_REFRESH_MS = Number(process.env.BOOK_REFRESH_MS) || 4000;
 const BROADCAST_MS = 1000;
+// Every watched outcome costs one book request per refresh, so the watch set
+// has to be bounded or a loop of /api/watch calls becomes a request storm.
+const MAX_OUTCOMES = Number(process.env.MAX_OUTCOMES) || 200;
+
+const ID_RE = /^\d{1,80}$/; // Gamma market ids and CLOB token ids are decimal strings
+const INTERVALS = new Set(['1h', '6h', '1d', '1w', '1m', 'max']);
 
 const paper = createPaperStore(path.join(__dirname, '..', '..', 'data', 'paper.json'));
 
@@ -140,9 +149,12 @@ app.use(express.json());
 app.get('/api/state', (_req, res) => res.json(snapshot()));
 
 app.get('/api/history/:tokenId', async (req, res) => {
+  const { tokenId } = req.params;
+  if (!ID_RE.test(tokenId)) return res.status(400).json({ error: 'invalid tokenId' });
   const interval = String(req.query.interval || '1w');
-  const history = await fetchHistory(req.params.tokenId, interval);
-  res.json({ tokenId: req.params.tokenId, interval, history });
+  if (!INTERVALS.has(interval)) return res.status(400).json({ error: 'invalid interval' });
+  const history = await fetchHistory(tokenId, interval);
+  res.json({ tokenId, interval, history });
 });
 
 app.get('/api/search', async (req, res) => {
@@ -167,7 +179,10 @@ app.get('/api/search', async (req, res) => {
 /** Add a market to the watch set by Gamma id. */
 app.post('/api/watch', async (req, res) => {
   const marketId = String(req.body?.marketId || '');
-  if (!marketId) return res.status(400).json({ error: 'marketId required' });
+  if (!ID_RE.test(marketId)) return res.status(400).json({ error: 'marketId must be a numeric Gamma id' });
+  if (rows.size >= MAX_OUTCOMES) {
+    return res.status(429).json({ error: `watch limit reached (${MAX_OUTCOMES} outcomes)` });
+  }
   try {
     const market = await fetchMarket(marketId);
     const added = addMarket(market);
@@ -198,7 +213,15 @@ app.post('/api/paper/order', (req, res) => {
 app.get('/api/paper/trades', (_req, res) => res.json({ trades: paper.trades() }));
 
 app.post('/api/paper/reset', (req, res) => {
-  paper.reset(Number(req.body?.balance) || undefined);
+  const raw = req.body?.balance;
+  let balance;
+  if (raw != null && raw !== '') {
+    balance = Number(raw);
+    if (!Number.isFinite(balance) || balance <= 0 || balance > 1e9) {
+      return res.status(400).json({ error: 'balance must be between 0 and 1,000,000,000' });
+    }
+  }
+  paper.reset(balance);
   broadcast();
   res.json({ ok: true });
 });
@@ -208,7 +231,26 @@ const dist = path.join(__dirname, '..', '..', 'web', 'dist');
 app.use(express.static(dist));
 
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
+
+/**
+ * Only pages served from this host (or the Vite dev server proxying for it)
+ * may open the relay socket. Browsers do not apply CORS to WebSockets, so
+ * without this any site open in the same browser could read the feed.
+ */
+function originAllowed(origin) {
+  if (!origin) return true; // non-browser clients (curl, scripts) send no Origin
+  try {
+    const { hostname } = new URL(origin);
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]' || hostname === HOST;
+  } catch {
+    return false;
+  }
+}
+
+const wss = new WebSocketServer({
+  server,
+  verifyClient: ({ origin }) => originAllowed(origin),
+});
 
 function broadcast() {
   if (!wss.clients.size) return;
@@ -244,8 +286,8 @@ async function main() {
   setInterval(refreshBooks, BOOK_REFRESH_MS);
   setInterval(broadcast, BROADCAST_MS);
 
-  server.listen(PORT, () => {
-    console.log(`\n  PolyTerm API   http://localhost:${PORT}`);
+  server.listen(PORT, HOST, () => {
+    console.log(`\n  PolyTerm API   http://${HOST}:${PORT}`);
     console.log(`  Web (dev)      http://localhost:5173\n`);
   });
 }

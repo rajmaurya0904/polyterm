@@ -16,7 +16,10 @@ export function createPaperStore(filePath) {
 
   function load() {
     try {
-      if (fs.existsSync(filePath)) return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      if (fs.existsSync(filePath)) {
+        const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        if (parsed && Number.isFinite(parsed.balance) && Array.isArray(parsed.trades)) return parsed;
+      }
     } catch {
       // Corrupt or unreadable — fall through to a fresh account rather than crash.
     }
@@ -25,9 +28,20 @@ export function createPaperStore(filePath) {
 
   let state = load();
 
+  /** Write-then-rename so a crash mid-write never leaves a truncated file. */
   function persist() {
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(filePath, JSON.stringify(state, null, 2));
+    const tmp = `${filePath}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
+    fs.renameSync(tmp, filePath);
+  }
+
+  // Trade ids double as React keys and expand handles in the UI, so they must
+  // stay unique even when two orders land in the same millisecond.
+  let lastId = state.trades.reduce((m, t) => Math.max(m, t.id || 0), 0);
+  function nextId() {
+    lastId = Math.max(lastId + 1, Date.now());
+    return lastId;
   }
 
   /**
@@ -136,7 +150,7 @@ export function createPaperStore(filePath) {
       state.balance += side === 'buy' ? -sim.cost : sim.cost;
 
       const trade = {
-        id: Date.now(),
+        id: nextId(),
         at: new Date().toISOString(),
         tokenId: row.tokenId,
         marketId: row.marketId,
